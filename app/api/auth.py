@@ -45,6 +45,8 @@ from app.api.helpers.utilities import get_serializer, str_generator
 from app.extensions.limiter import limiter
 from app.models import db
 from app.models.user import User
+from app.models.mfa_device import TOTPDevice
+
 
 logger = logging.getLogger(__name__)
 authorised_blueprint = Blueprint('authorised_blueprint', __name__, url_prefix='/')
@@ -424,6 +426,96 @@ def return_file(file_name_prefix, file_path, identifier):
         identifier,
     )
     return response
+
+
+### MFA APIs
+
+@auth_routes.route('/create-totp', methods=['GET', 'POST'])
+@jwt_required
+def enable_totp():
+    req_data = request.get_json()
+    user = User.query.filter_by(id=current_user.id).first()
+    if user is None:
+        return jsonify(message='User Not Found'), 400
+    device = TOTPDevice.query.filter_by(user=user).one_or_none()     
+    if request.method is 'GET':
+        if device is None:
+            device = TOTPDevice(user=user)
+            db.session.add(device)
+            db.session.commit()
+        return jsonify(config_url=device.config_url()), 200
+    # Handle POST request
+    if device is None:
+        return jsonify(message='TOTP device not found.'), 404
+    if device.activated:
+        return jsonify(message='TOTP device already activated.'), 400
+    if device.verify(req_data['otp']):
+        device.activated = True
+        db.session.commit()
+        return jsonify({
+            'message': 'TOTP device activated.',
+            'reset_code': device.reset_code()
+        }), 200
+    return jsonify(message='Wrong OTP.'), 400
+
+
+@auth_routes.route('/delete-totp', methods=['POST'])
+@jwt_required
+def disable_totp():
+    req_data = request.get_json()
+    user = User.query.filter_by(id=current_user.id).one_or_none()
+    if user is None:
+        return jsonify(message='User Not Found'), 400
+    device = TOTPDevice.query.filter_by(user=user, activated=True).one_or_none()
+    if device is not None:
+        if device.verify_token(req_data['otp']):
+            db.session.delete(device)
+            db.session.commit()
+            access_token = create_access_token(identity=user.username)
+            return jsonify({
+                'access_token': access_token,
+                'message': 'TOTP device removed.'
+            }), 200
+    return jsonify(message='Wrong OTP or no activated device.'), 400
+
+
+@auth_routes.route('/reset-totp', methods=['POST'])
+@jwt_required
+def reset_totp():
+    req_data = request.get_json()
+    user = User.query.filter_by(id=current_user.id).one_or_none()
+    if user is None:
+        return jsonify(message='User Not Found'), 400
+    device = TOTPDevice.query.filter_by(user=user, activated=True).one_or_none()
+    if device is not None and device.verify_reset(req_data['recovery_code']):
+        db.session.delete(device)
+        db.session.commit()
+        access_token = create_access_token(
+                identity=user.username,
+                additional_claims={'mfa_verified': True}
+            )
+        return jsonify({
+            'access_token': access_token,
+            'message': 'TOTP device removed.'
+        }), 200
+    return jsonify(message='Wrong recovery code or no activated device.'), 400
+
+
+@auth_routes.route('/verify-totp', methods=['POST'])
+@jwt_required
+def verify_totp():
+    req_data = request.get_json()
+    user = User.query.filter_by(id=current_user.id).one_or_none()
+    if user is None:
+        return jsonify(message='User Not Found'), 400
+    device = TOTPDevice.query.filter_by(user=user, activated=True).one_or_none()
+    if device is not None and device.verify(req_data['otp']):
+        access_token = create_access_token(identity=user.username)
+        return jsonify({
+            'access_token': access_token,
+            'message': 'Successfull.'
+        }), 200
+    return jsonify(message='Wrong OTP or no activated device.'), 400
 
 
 # Access for Environment details & Basic Auth Support
