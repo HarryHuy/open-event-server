@@ -1,12 +1,16 @@
 import datetime
+from functools import wraps
 
 import flask_login as login
 import pytz
 from flask_login import current_user
+from flask import jsonify
+from flask_jwt_extended import verify_jwt_in_request, get_jwt
 
 from app.models import db
 from app.models.user import User
 from app.models.user_token_blacklist import UserTokenBlackListTime
+from app.models.mfa import MFADevice
 
 
 class AuthManager:
@@ -65,3 +69,21 @@ def is_token_blacklisted(token):
     if not blacklist_time:
         return False
     return token['iat'] < blacklist_time.blacklisted_at.timestamp()
+
+
+def jwt_mfa_required(fn):
+    """
+    Customize jwt_required decorator to require additional MFA verification.
+    """
+
+    @wraps(fn)
+    def decorator(*args, **kwargs):
+        verify_jwt_in_request()
+        payload = get_jwt()
+        if not payload['mfa_verified']:
+            mfa_devices = MFADevice.query.filter_by(user=current_user, activated=True).all()
+            if mfa_devices is not None:
+                return jsonify(msg='MFA required.'), 403
+        return fn(*args, **kwargs)
+
+    return decorator
